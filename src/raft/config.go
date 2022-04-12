@@ -8,7 +8,10 @@ package raft
 // test with the original before submitting.
 //
 
-import "6.824/labgob"
+import (
+	"6.824/labgob"
+	"strconv"
+)
 import "6.824/labrpc"
 import "bytes"
 import "log"
@@ -197,7 +200,7 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 				lastApplied = m.SnapshotIndex
 			}
 			cfg.mu.Unlock()
-		} else if m.CommandValid && m.CommandIndex > lastApplied {
+		} else if m.CommandValid && m.CommandIndex > lastApplied && m.Command != nil {
 			//DPrintf("apply %v lastApplied %v\n", m.CommandIndex, lastApplied)
 			cfg.mu.Lock()
 			err_msg, prevok := cfg.checkLogs(i, m)
@@ -219,6 +222,21 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 				e.Encode(v)
 				cfg.rafts[i].Snapshot(m.CommandIndex, w.Bytes())
 			}
+		} else if m.CommandValid && m.CommandIndex > lastApplied && m.Command == nil {
+			//DPrintf("apply %v lastApplied %v\n", m.CommandIndex, lastApplied)
+			cfg.mu.Lock()
+			err_msg, prevok := cfg.checkLogs(i, m)
+			cfg.mu.Unlock()
+			if m.CommandIndex > 1 && prevok == false {
+				err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.CommandIndex)
+			}
+			if err_msg != "" {
+				log.Fatalf("apply error: %v\n", err_msg)
+				cfg.applyErr[i] = err_msg
+				// keep reading after error so that Raft doesn't block
+				// holding locks...
+			}
+			lastApplied = m.CommandIndex
 		} else {
 			// Ignore other types of ApplyMsg or old
 			// commands. Old command may never happen,
@@ -302,7 +320,7 @@ func (cfg *config) cleanup() {
 
 // attach server i to the net.
 func (cfg *config) connect(i int) {
-	// fmt.Printf("connect(%d)\n", i)
+	fmt.Printf("\033[1;35;42m%v is connectted\u001B[0m\n", i)
 
 	cfg.connected[i] = true
 
@@ -325,7 +343,7 @@ func (cfg *config) connect(i int) {
 
 // detach server i from the net.
 func (cfg *config) disconnect(i int) {
-	// fmt.Printf("disconnect(%d)\n", i)
+	fmt.Printf("\033[1;37;41m%v is disconnectted\u001B[0m\n", i)
 
 	cfg.connected[i] = false
 
@@ -369,16 +387,33 @@ func (cfg *config) setlongreordering(longrel bool) {
 // check that there's exactly one leader.
 // try a few times in case re-elections are needed.
 func (cfg *config) checkOneLeader() int {
+	var count int = 1
+	var mu sync.Mutex
+	Release := func(down int) {
+		time.Sleep(time.Duration(5000) * time.Millisecond)
+		mu.Lock()
+		count -= 1
+		if count == 0 {
+			panic("Waiting Too Long for " + strconv.Itoa(down))
+		}
+		mu.Unlock()
+	}
+	Acquire := func() {
+		mu.Lock()
+		count += 1
+		mu.Unlock()
+	}
 	for iters := 0; iters < 10; iters++ {
 		ms := 450 + (rand.Int63() % 100)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
-
 		leaders := make(map[int][]int)
 		for i := 0; i < cfg.n; i++ {
 			if cfg.connected[i] {
+				go Release(i)
 				if term, leader := cfg.rafts[i].GetState(); leader {
 					leaders[term] = append(leaders[term], i)
 				}
+				go Acquire()
 			}
 		}
 
@@ -497,8 +532,10 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 // if retry==false, calls Start() only once, in order
 // to simplify the early Lab 2B tests.
 func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
+	fmt.Printf("\033[1;37;45m command %v is sent\u001B[0m\n", cmd)
 	t0 := time.Now()
 	starts := 0
+	iii := -1
 	for time.Since(t0).Seconds() < 10 {
 		// try all the servers, maybe one is the leader.
 		index := -1
@@ -518,7 +555,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				}
 			}
 		}
-
+		iii = index
 		if index != -1 {
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.
@@ -535,13 +572,13 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				time.Sleep(20 * time.Millisecond)
 			}
 			if retry == false {
-				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
+				cfg.t.Fatalf("one(%v，%v) failed to reach agreement", cmd, index)
 			}
 		} else {
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
-	cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
+	cfg.t.Fatalf("one(%v,%v) failed to reach agreement", cmd, iii)
 	return -1
 }
 

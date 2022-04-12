@@ -1,6 +1,10 @@
 package kvraft
 
-import "6.824/porcupine"
+import (
+	"6.824/porcupine"
+	"io"
+	"os"
+)
 import "6.824/models"
 import "testing"
 import "strconv"
@@ -122,7 +126,7 @@ func spawn_clients_and_wait(t *testing.T, cfg *config, ncli int, fn func(me int,
 	}
 }
 
-// predict effect of Append(k, val) if old value is prev.
+// predict effect of Append(k, Val) if old value is prev.
 func NextValue(prev string, val string) string {
 	return prev + val
 }
@@ -197,7 +201,7 @@ func partitioner(t *testing.T, cfg *config, ch chan bool, done *int32) {
 // Basic test is as follows: one or more clients submitting Append/Get
 // operations to set of servers for some period of time.  After the period is
 // over, test checks that all appended values are present and in order for a
-// particular key.  If unreliable is set, RPCs may fail.  If crash is set, the
+// particular Key.  If unreliable is set, RPCs may fail.  If crash is set, the
 // servers crash after the period is over and restart.  If partitions is set,
 // the test repartitions the network concurrently with the clients and servers. If
 // maxraftstate is a positive number, the size of the state for Raft (i.e., log
@@ -280,11 +284,11 @@ func GenericTest(t *testing.T, part string, nclients int, nservers int, unreliab
 					Put(cfg, myck, key, nv, opLog, cli)
 					j++
 				} else {
-					// log.Printf("%d: client new get %v\n", cli, key)
+					// log.Printf("%d: client new get %v\n", cli, Key)
 					v := Get(cfg, myck, key, opLog, cli)
 					// the following check only makes sense when we're not using random keys
 					if !randomkeys && v != last {
-						t.Fatalf("get wrong value, key %v, wanted:\n%v\n, got\n%v\n", key, last, v)
+						t.Fatalf("get wrong value, Key %v, wanted:\n%v\n, got\n%v\n", key, last, v)
 					}
 				}
 			}
@@ -392,7 +396,7 @@ func GenericTestSpeed(t *testing.T, part string, maxraftstate int) {
 
 	cfg.begin(fmt.Sprintf("Test: ops complete fast enough (%s)", part))
 
-	// wait until first op completes, so we know a leader is elected
+	// wait until first Op completes, so we know a leader is elected
 	// and KV servers are ready to process client requests
 	ck.Get("x")
 
@@ -410,7 +414,7 @@ func GenericTestSpeed(t *testing.T, part string, maxraftstate int) {
 	const opsPerInterval = 3
 	const timePerOp = heartbeatInterval / opsPerInterval
 	if dur > numOps*timePerOp {
-		t.Fatalf("Operations completed too slowly %v/op > %v/op\n", dur/numOps, timePerOp)
+		t.Fatalf("Operations completed too slowly %v/Op > %v/Op\n", dur/numOps, timePerOp)
 	}
 }
 
@@ -440,7 +444,7 @@ func TestUnreliableOneKey3A(t *testing.T) {
 
 	ck := cfg.makeClient(cfg.All())
 
-	cfg.begin("Test: concurrent append to same key, unreliable (3A)")
+	cfg.begin("Test: concurrent append to same Key, unreliable (3A)")
 
 	Put(cfg, ck, "k", "", nil, -1)
 
@@ -711,4 +715,142 @@ func TestSnapshotUnreliableRecoverConcurrentPartition3B(t *testing.T) {
 func TestSnapshotUnreliableRecoverConcurrentPartitionLinearizable3B(t *testing.T) {
 	// Test: unreliable net, restarts, partitions, snapshots, random keys, many clients (3B) ...
 	GenericTest(t, "3B", 15, 7, true, true, true, 1000, true)
+}
+
+//其他测试
+func GenericTestConcurrent(t *testing.T, part string, maxraftstate int, nclients int) {
+	const nservers = 3
+	const numOps = 1000
+	//const nclients=100
+	cfg := make_config(t, nservers, false, maxraftstate)
+	defer cfg.cleanup()
+
+	ck := cfg.makeClient(cfg.All())
+
+	cfg.begin(fmt.Sprintf("Test: ops complete fast enough (%s)", part))
+
+	// wait until first Op completes, so we know a leader is elected
+	// and KV servers are ready to process client requests
+	ck.Get("x")
+	clnts := make([]chan int, nclients)
+	for i := 0; i < nclients; i++ {
+		clnts[i] = make(chan int)
+	}
+	go spawn_clients_and_wait(t, cfg, nclients, func(cli int, myck *Clerk, t *testing.T) {
+		defer func() {
+			clnts[cli] <- cli
+		}()
+		key := "x" + strconv.Itoa(cli)
+		for i := 0; i < numOps; i++ {
+			val := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(i) + " y"
+			myck.Append(key, val)
+			if cli == 0 {
+				fmt.Printf("[%v]%v\n", cli, i)
+			}
+		}
+		v := myck.Get(key)
+		checkClntAppends(t, cli, v, numOps)
+	})
+	for i := 0; i < nclients; i++ {
+		<-clnts[i]
+	}
+}
+func TestConcurrent13A(t *testing.T) {
+	checkFileIsExist := func(filename string) bool {
+		if _, err := os.Stat(filename); os.IsNotExist(err) {
+			return false
+		}
+		return true
+	}
+	var filename = "E:\\6.824\\src\\kvraft\\res1.txt"
+	var f *os.File
+	var err1 error
+	if checkFileIsExist(filename) { //如果文件存在
+		f, err1 = os.OpenFile(filename, os.O_APPEND, 0666) //打开文件
+		fmt.Println("文件存在")
+	} else {
+		f, err1 = os.Create(filename) //创建文件
+		fmt.Println("文件不存在")
+	}
+	if err1 != nil {
+		panic(err1)
+	}
+	defer f.Close()
+	for i := 281; i < 290; i += 10 {
+		start := time.Now()
+		GenericTestConcurrent(t, "3A", 1000, i)
+		dur := time.Since(start)
+		val := fmt.Sprintf("%v,%vs\n", i, dur.Seconds())
+		io.WriteString(f, val) //写入文件(字符串)
+	}
+}
+func GenericTestSpeed1(t *testing.T, part string, maxraftstate int, nservers int) {
+	//const nservers = 181
+	const numOps = 1000
+	cfg := make_config(t, nservers, false, maxraftstate)
+	defer cfg.cleanup()
+
+	ck := cfg.makeClient(cfg.All())
+
+	//cfg.begin(fmt.Sprintf("Test: ops complete fast enough (%s)", part))
+
+	// wait until first Op completes, so we know a leader is elected
+	// and KV servers are ready to process client requests
+	ck.Get("x")
+
+	start := time.Now()
+	for i := 0; i < numOps; i++ {
+		ck.Append("x", "x 0 "+strconv.Itoa(i)+" y")
+		if i%10 == 0 {
+			fmt.Printf("%v\n", i)
+		}
+	}
+	dur := time.Since(start)
+
+	v := ck.Get("x")
+	checkClntAppends(t, 0, v, numOps)
+
+	// heartbeat interval should be ~ 100 ms; require at least 3 ops per
+	const heartbeatInterval = 100 * time.Millisecond
+	const opsPerInterval = 3
+	const timePerOp = heartbeatInterval / opsPerInterval
+	if dur > numOps*timePerOp {
+		t.Fatalf("Operations completed too slowly %v/Op > %v/Op\n", dur/numOps, timePerOp)
+	}
+}
+func TestSpeed3A1(t *testing.T) {
+	checkFileIsExist := func(filename string) bool {
+		if _, err := os.Stat(filename); os.IsNotExist(err) {
+			return false
+		}
+		return true
+	}
+
+	var filename = "E:\\6.824\\src\\kvraft\\res.txt"
+	var f *os.File
+	var err1 error
+	if checkFileIsExist(filename) { //如果文件存在
+		f, err1 = os.OpenFile(filename, os.O_APPEND, 0666) //打开文件
+		fmt.Println("文件存在")
+	} else {
+		f, err1 = os.Create(filename) //创建文件
+		fmt.Println("文件不存在")
+	}
+	if err1 != nil {
+		panic(err1)
+	}
+	defer f.Close()
+	for i := 283; i < 1000; i += 10 {
+		start := time.Now()
+		GenericTestSpeed1(t, "3A", 1000, i)
+		dur := time.Since(start)
+		val := fmt.Sprintf("%v,%vs\n", i, dur.Seconds())
+		io.WriteString(f, val) //写入文件(字符串)
+	}
+}
+func TestSnapshotRPC3BLong(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		fmt.Printf("%v is Testing\n", i+1)
+		TestSnapshotRPC3B(t)
+	}
 }

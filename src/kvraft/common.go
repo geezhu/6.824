@@ -1,5 +1,7 @@
 package kvraft
 
+import "sync"
+
 const (
 	OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
@@ -30,4 +32,37 @@ type GetArgs struct {
 type GetReply struct {
 	Err   Err
 	Value string
+}
+
+//const MAX_WINSZ = 20
+const MAX_RETRY = 8
+
+type Sequential struct {
+	seq int
+	mu  sync.Mutex
+}
+
+func (s *Sequential) GetSeq() int {
+	s.mu.Lock()
+	n := s.seq
+	s.seq++
+	s.mu.Unlock()
+	return n
+	// You will have to modify this function.
+}
+
+type ClientReply struct {
+	Err   Err
+	Value string
+}
+type ClientApplyMsg struct {
+	Key     string
+	Value   string
+	Op      string // "Put" or "Append"
+	retChan chan ClientReply
+}
+type uid string
+
+func randuid(n int) uid {
+	return uid(randstring(n))
 }

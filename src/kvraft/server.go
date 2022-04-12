@@ -4,6 +4,7 @@ import (
 	"6.824/labgob"
 	"6.824/labrpc"
 	"6.824/raft"
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -17,33 +18,76 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	}
 	return
 }
+func logger(format string, a ...interface{}) (n int, err error) {
+	//pc, _, line, _ := runtime.Caller(1)
+	//caller:=runtime.FuncForPC(pc).Name()
+	//callers:=strings.Split(caller, ".")
+	//caller="[From:"+callers[len(callers)-1]+", line="+strconv.Itoa(line)+"]"
+	//if Debug {
+	//	log.Printf(format+caller, a...)
+	//}
+	return
+}
 
+type operation int
+
+const (
+	getOp    operation = iota
+	putOp    operation = iota
+	appendOp operation = iota
+)
 
 type Op struct {
+	Id  uid
+	Seq int
+	Rcv int
+	Op  operation
+	Key string
+	Val string
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
 }
 
 type KVServer struct {
-	mu      sync.Mutex
-	me      int
-	rf      *raft.Raft
-	applyCh chan raft.ApplyMsg
-	dead    int32 // set by Kill()
-
-	maxraftstate int // snapshot if log grows this big
-
+	mu           sync.Mutex
+	session_mu   sync.Mutex
+	me           int
+	rf           *raft.Raft
+	applyCh      chan raft.ApplyMsg
+	dead         int32 // set by Kill()
+	maxraftstate int   // snapshot if log grows this big
+	Buffer       map[string]string
+	SessionMap   map[uid]int
+	SessionArr   []session
 	// Your definitions here.
 }
 
+//func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
+//	// Your code here.
+//}
+//
+//func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
+//	// Your code here.
+//}
+func (kv *KVServer) AppendOp(args *AppendOpArgs, reply *AppendOpReply) {
+	//DPrintf("KV.AppendOp")
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if kv.rf.IsLeader() {
+		reply.NotLeader = false
+	} else {
+		reply.NotLeader = true
+		return
+	}
+	if _, ok := kv.SessionMap[args.Uid]; ok {
 
-func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
-}
-
-func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
+	} else {
+		kv.SessionMap[args.Uid] = len(kv.SessionArr)
+		kv.SessionArr = append(kv.SessionArr, *MakeSession(args.Uid, 0, 0))
+	}
+	i := kv.SessionMap[args.Uid]
+	kv.SessionArr[i].AppendOp(&kv.session_mu, kv.rf, args, reply)
 }
 
 //
@@ -61,16 +105,116 @@ func (kv *KVServer) Kill() {
 	kv.rf.Kill()
 	// Your code here, if desired.
 }
+func (kv *KVServer) InstallSnapshot(snap []byte) {
+	r := bytes.NewBuffer(snap)
+	d := labgob.NewDecoder(r)
+	var buf map[string]string
+	var SessionMap map[uid]int
+	var SessionArr []session
+	if d.Decode(&buf) != nil ||
+		d.Decode(&SessionMap) != nil ||
+		d.Decode(&SessionArr) != nil {
+		panic("readPersist:Decode Err!")
+	} else {
+		kv.SessionMap = SessionMap
+		kv.SessionArr = SessionArr
+		kv.Buffer = buf
+	}
+}
+func (kv *KVServer) MakeSnapshot() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	_ = e.Encode(kv.Buffer)
+	_ = e.Encode(kv.SessionMap)
+	_ = e.Encode(kv.SessionArr)
+	return w.Bytes()
+}
+func (kv *KVServer) execute(op1 Op) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	res := ClientResult{
+		Seq: op1.Seq,
+		Err: "",
+		Val: "",
+	}
+	originalVal, containsKey := kv.Buffer[op1.Key]
+	sessionIndex, containSession := kv.SessionMap[op1.Id]
+	if !containSession {
+		s1 := MakeSession(op1.Id, 0, op1.Seq)
+		kv.SessionMap[op1.Id] = len(kv.SessionArr)
+		kv.SessionArr = append(kv.SessionArr, *s1)
+		sessionIndex = kv.SessionMap[op1.Id]
+	}
+	if !kv.SessionArr[sessionIndex].isExecutable(&kv.session_mu, op1.Seq) {
+		return
+	}
+	DPrintf("ApplySeq[%v]:[%v]=%v", op1.Id, kv.me, kv.SessionArr[sessionIndex].ApplySeq)
+	switch op1.Op {
+	case putOp:
+		kv.Buffer[op1.Key] = op1.Val
+		res.Err = OK
+		kv.SessionArr[sessionIndex].putWrite(&kv.session_mu, op1.Seq)
+		DPrintf("execute[%v,%v]:[%v]buf[%v]=%v", op1.Seq, op1.Id, kv.me, op1.Key, kv.Buffer[op1.Key])
+	case appendOp:
+		kv.Buffer[op1.Key] = originalVal + op1.Val
+		DPrintf("execute[%v,%v]:[%v]buf[%v]=%v", op1.Seq, op1.Id, kv.me, op1.Key, kv.Buffer[op1.Key])
+		res.Err = OK
+		kv.SessionArr[sessionIndex].putWrite(&kv.session_mu, op1.Seq)
+	case getOp:
+		if containsKey {
+			res.Val = originalVal
+			DPrintf("execute[%v,%v]:[%v]buf[%v]=%v", op1.Seq, op1.Id, kv.me, op1.Key, kv.Buffer[op1.Key])
+			res.Err = OK
+		} else {
+			res.Err = ErrNoKey
+			DPrintf("execute[%v,%v]:[%v]buf[%v]=NoKey", op1.Seq, op1.Id, kv.me, op1.Key)
+		}
+		kv.SessionArr[sessionIndex].putRead(&kv.session_mu, res, op1.Rcv)
+	}
+
+}
 
 func (kv *KVServer) killed() bool {
 	z := atomic.LoadInt32(&kv.dead)
 	return z == 1
 }
+func (kv *KVServer) apply() {
+	for kv.killed() == false {
+		count := 0
+		for msg := range kv.applyCh {
+			//DPrintf("%v:RECV ApplyMsg",kv.me)
+			if msg.CommandValid {
+				count += 1
+				if msg.Command == nil {
+					//noop
+				} else if val, ok := msg.Command.(Op); ok {
+					//DPrintf("Exec=%v",val.Seq)
+					kv.execute(val)
+				} else {
+					panic("wrong type of cmd")
+				}
+				if kv.maxraftstate != -1 && count*(60) >= kv.maxraftstate {
+					count = 0
+					DPrintf("[%v]Now Snapshot from [%v]!", kv.me, msg.CommandIndex)
+					kv.rf.Snapshot(msg.CommandIndex, kv.MakeSnapshot())
+				}
+			} else if msg.SnapshotValid == true {
+				if kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot) {
+					kv.InstallSnapshot(msg.Snapshot)
+					count = 0
+					DPrintf("[%v]Suc install Snapshot!", kv.me)
+				} else {
+					DPrintf("[%v]Not install Snapshot!", kv.me)
+				}
+			}
+		}
+	}
+}
 
 //
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
-// form the fault-tolerant key/value service.
+// form the fault-tolerant Key/value service.
 // me is the index of the current server in servers[].
 // the k/v server should store snapshots through the underlying Raft
 // implementation, which should call persister.SaveStateAndSnapshot() to
@@ -94,8 +238,10 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-
+	kv.SessionArr = make([]session, 0)
+	kv.SessionMap = make(map[uid]int)
+	kv.Buffer = make(map[string]string)
 	// You may need initialization code here.
-
+	go kv.apply()
 	return kv
 }
